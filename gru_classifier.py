@@ -121,11 +121,19 @@ def train_take_skip_model(
     train_labels = np.array([lbl for _, lbl in train_ds.samples])
     pos_weight = estimate_pos_weight(train_labels).to(device)
     loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    # Per-sample (reduction="none") version of the same loss, used only to measure how much
+    # the per-trade error SPREADS around the epoch's mean loss (its variance) - the mean loss
+    # alone can't show whether that error is roughly constant across trades (homoscedastic) or
+    # swings wildly for some trades and not others (heteroscedastic).
+    loss_fn_per_sample = nn.BCEWithLogitsLoss(pos_weight=pos_weight, reduction="none")
 
     train_loader = torch.utils.data.DataLoader(train_ds, batch_size=32, shuffle=True)
     val_loader = torch.utils.data.DataLoader(val_ds, batch_size=32, shuffle=False)
 
-    history = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []}
+    history = {
+        "train_loss": [], "train_acc": [], "train_loss_std": [],
+        "val_loss": [], "val_acc": [], "val_loss_std": [],
+    }
     best_val_loss = float("inf")
     best_state = None
     epochs_no_improve = 0
@@ -134,6 +142,7 @@ def train_take_skip_model(
         model.train()
         running = 0.0
         n_correct_train = 0
+        train_sample_losses: list[float] = []
         for windows, labels in train_loader:
             windows, labels = windows.to(device), labels.to(device)
             optimizer.zero_grad()
@@ -147,25 +156,32 @@ def train_take_skip_model(
             # above — i.e. it reflects the model's state during this batch's
             # training step, not a separate post-hoc eval pass.
             n_correct_train += ((logits.detach() >= 0) == (labels >= 0.5)).sum().item()
+            train_sample_losses.extend(loss_fn_per_sample(logits.detach(), labels).cpu().tolist())
         train_loss = running / len(train_ds)
         train_acc = n_correct_train / max(len(train_ds), 1)
+        train_loss_std = float(np.std(train_sample_losses)) if train_sample_losses else 0.0
 
         model.eval()
         running_val = 0.0
         n_correct = 0
+        val_sample_losses: list[float] = []
         with torch.no_grad():
             for windows, labels in val_loader:
                 windows, labels = windows.to(device), labels.to(device)
                 logits = model(windows)
                 running_val += loss_fn(logits, labels).item() * len(labels)
                 n_correct += ((logits >= 0) == (labels >= 0.5)).sum().item()
+                val_sample_losses.extend(loss_fn_per_sample(logits, labels).cpu().tolist())
         val_loss = running_val / max(len(val_ds), 1)
         val_acc = n_correct / max(len(val_ds), 1)
+        val_loss_std = float(np.std(val_sample_losses)) if val_sample_losses else 0.0
 
         history["train_loss"].append(train_loss)
         history["train_acc"].append(train_acc)
+        history["train_loss_std"].append(train_loss_std)
         history["val_loss"].append(val_loss)
         history["val_acc"].append(val_acc)
+        history["val_loss_std"].append(val_loss_std)
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss

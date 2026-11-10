@@ -36,6 +36,14 @@ RUNS_DIR = APP_DIR / "runs"
 CONFIGS_DIR = APP_DIR / "configs"
 CONFIGS_DIR.mkdir(exist_ok=True)
 
+RULE_LABELS = {
+    "rule1_benchmark_trend": "Rule 1 — benchmark above its moving average (market uptrend)",
+    "rule2_stock_trend": "Rule 2 — stock above its own moving average (stock uptrend)",
+    "rule3_rel_strength": "Rule 3 — stock's trailing return beats the benchmark's (relative strength)",
+    "rule4_pullback": "Rule 4 — price pulled back from a recent high",
+    "rule5_trigger": "Rule 5 — today's close broke back above yesterday's high (trigger)",
+}
+
 MODE_TO_BLOCKS = {
     "Full (technical + regime + volatility)": ["technical", "regime", "volatility"],
     "No regime (technical + volatility)": ["technical", "volatility"],
@@ -143,15 +151,47 @@ def render_report(run_dir: Path, reports_subdir: str, label: str) -> None:
     st.caption(f"n_test_trades={row['n_test_trades']}  |  n_admitted_portfolio={row['n_admitted_portfolio']}  |  "
                f"selected_threshold={row['selected_threshold']}")
 
-    img_cols = st.columns(3)
+    img_cols = st.columns(4)
     for col, name, caption in zip(
         img_cols,
-        ["equity_curve.png", "drawdown.png", "calibration.png"],
-        ["Equity curve", "Drawdown", "Calibration"],
+        ["equity_curve.png", "drawdown.png", "calibration.png", "outcome_variance.png"],
+        ["Equity curve", "Drawdown", "Calibration", "Outcome variance"],
     ):
         p = reports_dir / name
         if p.exists():
             col.image(str(p), caption=caption, use_container_width=True)
+
+    variance_by_bucket = load_csv(reports_dir / "variance_by_bucket.csv")
+    if variance_by_bucket is not None and len(variance_by_bucket):
+        std_col = variance_by_bucket["std_return"].dropna()
+        rising = len(std_col) >= 2 and std_col.iloc[-1] > std_col.iloc[0] * 1.2
+        falling = len(std_col) >= 2 and std_col.iloc[-1] < std_col.iloc[0] * 0.8
+        if rising:
+            variance_verdict = ("⚠️ Outcome variance is **higher in the high-confidence buckets** than "
+                                "the low-confidence ones - the model's most-trusted signals are actually "
+                                "its least predictable in terms of win/loss size. Confidence here is "
+                                "tracking direction, not risk.")
+        elif falling:
+            variance_verdict = ("✅ Outcome variance **shrinks as take_prob rises** - high-confidence "
+                                "signals aren't just more often right, their outcomes are also more "
+                                "consistent/tighter, which is what you'd want from a well-behaved "
+                                "probability.")
+        else:
+            variance_verdict = ("ℹ️ Outcome variance is roughly flat across confidence buckets - "
+                                "take_prob is tracking win-rate (see the calibration chart) more than "
+                                "it's tracking the size/consistency of the outcome.")
+        st.markdown(
+            "**Outcome variance chart, explained:** the calibration chart shows whether a bucket's "
+            "trades *win more often* as take_prob rises. This chart asks a different question - when "
+            "a trade in that bucket resolves, how much does the realized `net_return` **vary**? A "
+            "bucket with a tall bar has trades whose outcomes range widely (some big winners, some "
+            "big losers cancelling out in the mean); a short bar means outcomes in that bucket are "
+            "clustered close together. Reading left (low confidence) to right (high confidence) tells "
+            "you whether the model's confidence says anything about the *risk* of a trade, not just "
+            "its *direction*.\n\n" + variance_verdict
+        )
+        with st.expander("Variance by bucket (raw numbers)"):
+            st.dataframe(variance_by_bucket, use_container_width=True)
 
     trades = load_csv(reports_dir / "accepted_trades.csv")
     if trades is not None and len(trades):
@@ -497,8 +537,8 @@ st.title("Strategy Lab")
 st.caption("Train/eval the GRU take-skip model on real tickers, then test the saved "
            "checkpoint on a later holdout period - all from one panel.")
 
-tab_train, tab_eval, tab_test, tab_live = st.tabs(
-    ["1. Train", "2. Eval (dev)", "3. Test (holdout)", "Live quote (Alpaca)"]
+tab_train, tab_eval, tab_test, tab_live, tab_predict = st.tabs(
+    ["1. Train", "2. Eval (dev)", "3. Test (holdout)", "Live quote (Alpaca)", "Next-day prediction"]
 )
 
 with tab_train:
@@ -561,6 +601,38 @@ toward the actual outcome (label 1 = target hit profitably, 0 = stop/timeout).
             """
             if history else ""
         )
+    loss_variance_path = run_dir / "loss_variance.png"
+    if loss_variance_path.exists():
+        st.subheader("Per-trade loss variance per epoch")
+        st.image(str(loss_variance_path), use_container_width=True)
+        history = load_json(run_dir / "history.json")
+        if history and "train_loss_std" in history and "val_loss_std" in history:
+            final_train_loss_std = history["train_loss_std"][-1]
+            final_val_loss_std = history["val_loss_std"][-1]
+            rising = final_val_loss_std > history["val_loss_std"][0] * 1.2
+            hetero_note = (
+                "⚠️ Validation loss variance is **rising** as training goes on - the model is getting "
+                "confidently wrong on a subset of trades (often the rarer/noisier setups) even while "
+                "its *average* loss looks fine. Worth checking the worst trades in the eval report, or "
+                "adding regularization."
+                if rising else
+                "✅ Loss variance is flat or shrinking over epochs - the model's error size is roughly "
+                "**homoscedastic** (consistently sized across trades), not concentrated into a handful "
+                "of badly-misjudged ones."
+            )
+            st.markdown(
+                "**What this curve is:** the training-curves panel above shows the *average* loss per "
+                "epoch, but two epochs with the same average loss can look very different underneath - "
+                "one where every trade is off by about the same amount (**homoscedastic**, consistent "
+                "error), or one where most trades are nearly perfect and a few are wildly wrong "
+                "(**heteroscedastic**, lumpy error). This chart plots the **standard deviation of the "
+                "per-trade loss** within each epoch to tell those two cases apart - distinct from the "
+                "'Volatility clustering check' below, which is about GARCH fitting price volatility, "
+                "not about the model's own error.\n\n"
+                f"Final epoch: `train_loss_std={final_train_loss_std:.4f}` "
+                f"`val_loss_std={final_val_loss_std:.4f}`.\n\n" + hetero_note
+            )
+
     hetero_plots = sorted(run_dir.glob("heteroscedasticity_*.png")) if run_dir.exists() else []
     if hetero_plots:
         st.subheader("Volatility clustering check (train/dev)")
@@ -624,3 +696,71 @@ with tab_live:
                 st.warning(f"No trade data returned: {data}")
         except RuntimeError as e:
             st.error(str(e))
+
+with tab_predict:
+    st.write(
+        "Runs the pullback-entry rules + the saved GRU model **as of Test (holdout) end** "
+        f"(**{test_end}**) and reports what that implies for the very next trading session "
+        f"(**{(pd.Timestamp(test_end) + pd.tseries.offsets.BDay(1)).date()}**)."
+    )
+    st.caption(
+        "This is not a crystal ball on tomorrow's price - every rule and every feature used here is "
+        "computed from data up to and including the 'as of' date only. What it predicts is whether "
+        "the *strategy itself* would buy at tomorrow's open, which is exactly how trade_simulation.py "
+        "always enters: one session after the signal date."
+    )
+    as_of = st.date_input(
+        "As of (signal date)", value=test_end,
+        help="The last known trading day to evaluate the entry rules and model on. Defaults to Test "
+             "(holdout) end. The prediction is always for the next trading session AFTER this date.",
+    )
+    predict_buffer_start = as_of - timedelta(days=buffer_days)
+    if st.button("Predict next session", type="primary"):
+        if not run_dir.exists():
+            st.error("No run found - train first.")
+        else:
+            with st.spinner("Scoring the entry rules and model as of the selected date..."):
+                code, _ = run_cli([
+                    "predict-next", "--run-id", run_id, "--device", device,
+                    "--buffer-start", predict_buffer_start.isoformat(),
+                    "--as-of", as_of.isoformat(),
+                ])
+            if code == 0:
+                st.success("Prediction finished.")
+            else:
+                st.error(f"Prediction failed (exit code {code}) - see log above.")
+
+    pred_path = run_dir / "predictions" / f"{as_of.isoformat()}.json"
+    predictions = load_json(pred_path) if pred_path.exists() else None
+    if predictions is None:
+        st.info("No prediction yet for this date - click 'Predict next session' above.")
+    else:
+        for p in predictions:
+            st.markdown(f"### {p['ticker']}")
+            if p["status"] != "ok":
+                st.warning(p["note"])
+                continue
+
+            cols = st.columns(3)
+            prob = p["take_prob"]
+            cols[0].metric(
+                "Model confidence (max likelihood of a good entry)",
+                f"{prob:.1%}" if prob is not None else "n/a",
+            )
+            cols[1].metric("Selected threshold", f"{p['threshold']:.1%}")
+            cols[2].metric(
+                "Entry signal present?",
+                f"{'Yes' if p['candidate_signal'] else 'No'} ({p['rules_passed']}/5, need "
+                f">= {p['min_rules_required']})",
+            )
+
+            if p["decision"] == "BUY":
+                st.success(f"**BUY — this is an entry (long) signal for {p['next_session']}.**")
+            else:
+                st.error(f"**NO BUY — not an entry signal for {p['next_session']}.**")
+            st.write(p["reason"])
+
+            with st.expander("Rule-by-rule breakdown"):
+                for rule, passed in p["rules"].items():
+                    icon = "✅" if passed else "❌"
+                    st.write(f"{icon} {RULE_LABELS.get(rule, rule)}")

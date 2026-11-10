@@ -32,7 +32,7 @@ from causal_hmm import CausalHMM
 from feature_blocks import build_feature_frame
 from gru_classifier import CandidateWindowDataset, GRUConfig, TakeSkipGRU, train_take_skip_model
 from portfolio_backtest import PortfolioConfig, run_portfolio_backtest
-from pullback_entry import PullbackConfig, candidate_signal
+from pullback_entry import PullbackConfig, RULE_DESCRIPTIONS, candidate_signal, candidate_signal_detail
 from real_data import load_real_universe
 from regime_features import fit_regime_model
 from synthetic_data import generate_synthetic_universe
@@ -211,6 +211,47 @@ def _plot_training_curves(history: dict, out_path: Path) -> None:
     plt.close(fig)
 
 
+def _plot_loss_variance(history: dict, out_path: Path) -> None:
+    """1-panel PNG: std of the per-trade BCE loss, train vs. val, per epoch.
+    _plot_training_curves's loss panel shows the MEAN error per epoch; two
+    epochs with the same mean can still look very different underneath - one
+    where every trade is off by about the same amount (homoscedastic), or
+    one where most trades are nearly perfect and a few are wildly wrong
+    (heteroscedastic). This chart is what tells those two cases apart. Only
+    called when history has train_loss_std/val_loss_std (older runs trained
+    before this was added won't)."""
+    if "train_loss_std" not in history or "val_loss_std" not in history:
+        return
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    epochs = list(range(1, len(history["train_loss_std"]) + 1))
+    fig, ax = plt.subplots(figsize=(9, 3.5))
+    ax.plot(epochs, history["train_loss_std"], marker="o", markersize=3, color="tab:blue",
+            label="train loss std (spread across trades)")
+    ax.plot(epochs, history["val_loss_std"], marker="o", markersize=3, color="tab:orange",
+            label="val loss std (spread across trades)")
+    ax.annotate(
+        f"{history['train_loss_std'][-1]:.4f}", (epochs[-1], history["train_loss_std"][-1]),
+        textcoords="offset points", xytext=(6, 4), color="tab:blue", fontsize=9,
+    )
+    ax.annotate(
+        f"{history['val_loss_std'][-1]:.4f}", (epochs[-1], history["val_loss_std"][-1]),
+        textcoords="offset points", xytext=(6, -10), color="tab:orange", fontsize=9,
+    )
+    ax.set_title("Per-trade loss variance per epoch - is the model's error size constant "
+                 "across trades, or does it swing wildly for some? (training-phase "
+                 "heteroscedasticity, distinct from the GARCH volatility-clustering check)")
+    ax.set_xlabel("epoch")
+    ax.set_ylabel("std of per-trade BCE loss")
+    ax.grid(alpha=0.3)
+    ax.legend(loc="upper right")
+    fig.tight_layout()
+    fig.savefig(out_path)
+    plt.close(fig)
+
+
 def _score(model: TakeSkipGRU, ds: CandidateWindowDataset, device: torch.device) -> np.ndarray:
     if len(ds) == 0:
         return np.array([])
@@ -336,6 +377,9 @@ def cmd_train(args: argparse.Namespace) -> None:
     # training_curves.png — loss (down) and accuracy (up) vs. epoch, side by side.
     _plot_training_curves(history, run_dir / "training_curves.png")
 
+    # loss_variance.png — per-trade loss std per epoch (training-phase heteroscedasticity).
+    _plot_loss_variance(history, run_dir / "loss_variance.png")
+
     # regime_model.json — one fitted CausalHMM per ticker (plain lists, JSON-stable).
     with open(run_dir / "regime_model.json", "w") as f:
         json.dump({t: _hmm_to_json(m) for t, m in regime_models.items()}, f, indent=2)
@@ -405,6 +449,40 @@ def _write_trades_csv(path: Path, accepted: pd.DataFrame, take_probs: np.ndarray
                          "take_prob", "net_return", "label"] if c in out.columns]
     out = out[cols].sort_values("net_return", ascending=False)
     out.to_csv(path, index=False)
+
+
+def _write_outcome_variance_report(
+    reports_dir: Path, test_probs: np.ndarray, net_returns: np.ndarray, title_prefix: str = ""
+) -> None:
+    """Groups trades into take_prob buckets (same qcut binning as the calibration
+    chart) and plots the STD of net_return within each bucket, not just its mean -
+    i.e. whether outcome variance is roughly constant across confidence levels
+    (homoscedastic) or grows/shrinks with confidence (heteroscedastic). Distinct
+    from volatility_features.plot_heteroscedasticity (which checks the GARCH price-
+    volatility fit): this checks whether take_prob says anything about the SIZE/
+    consistency of a trade's outcome, not just its win-rate (see calibration.png)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots()
+    if len(test_probs) >= 3:
+        n_bins = min(5, max(1, len(test_probs) // 3))
+        bins = pd.qcut(pd.Series(test_probs), n_bins, duplicates="drop")
+        grouped = pd.Series(net_returns).groupby(bins)
+        stats = grouped.agg(["mean", "std", "count"]).rename(
+            columns={"mean": "mean_return", "std": "std_return", "count": "n_trades"}
+        )
+        stats.to_csv(reports_dir / "variance_by_bucket.csv")
+
+        stats["std_return"].plot(
+            ax=ax, kind="bar", color="#F58518",
+            title=f"{title_prefix}Outcome variance: std of net_return by take_prob bucket",
+        )
+        ax.set_ylabel("std(net_return) within bucket")
+        ax.set_xlabel("take_prob bucket (low -> high confidence)")
+    fig.savefig(reports_dir / "outcome_variance.png", bbox_inches="tight")
+    plt.close(fig)
 
 
 def _attach_portfolio_columns(
@@ -541,6 +619,8 @@ def cmd_evaluate(args: argparse.Namespace) -> None:
     fig.savefig(reports_dir / "calibration.png", bbox_inches="tight")
     plt.close(fig)
 
+    _write_outcome_variance_report(reports_dir, test_probs, test_trades["net_return"].to_numpy())
+
     print(f"evaluate: wrote reports to {reports_dir}")
 
 
@@ -675,6 +755,10 @@ def cmd_evaluate_holdout(args: argparse.Namespace) -> None:
     fig.savefig(reports_dir / "calibration.png", bbox_inches="tight")
     plt.close(fig)
 
+    _write_outcome_variance_report(
+        reports_dir, test_probs, test_trades["net_return"].to_numpy(), title_prefix="Holdout "
+    )
+
     print(f"evaluate-holdout: {fold_name} | n_test_trades={len(test_trades)} "
           f"test_accuracy={test_accuracy} test_expectancy={test_expectancy} "
           f"final_equity={final_equity:.2f} max_drawdown={max_drawdown:.4f} "
@@ -747,6 +831,153 @@ def cmd_signals(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# predict-next: given a saved run and an "as-of" date (normally the last day
+# of a train/dev/holdout window, e.g. test_end), evaluates the pullback-entry
+# rules and the GRU model AT that date and reports what it implies for the
+# *next* trading session - because trade_simulation.py always enters on the
+# session AFTER signal_date's open (see simulate_trade: entry_pos = sig_pos+1).
+# So "signal fires on test_end" literally means "the strategy would buy at
+# the open of the next session". No future price data is used or needed:
+# every rule and every feature in the lookback window is computed using data
+# up to and including as-of only.
+# ---------------------------------------------------------------------------
+
+def cmd_predict_next(args: argparse.Namespace) -> None:
+    run_dir = Path("runs") / args.run_id
+    cfg = load_config(str(run_dir / "config_used.yaml"))
+    with open(run_dir / "run_metadata.json") as f:
+        metadata = json.load(f)
+    if metadata.get("insufficient_data"):
+        print(f"predict-next: run {args.run_id} had insufficient data at train time - nothing to predict.")
+        return
+
+    device = _resolve_device(args.device)
+
+    data_cfg = dict(cfg)
+    data_cfg["data"] = dict(cfg["data"])
+    data_cfg["data"]["start"] = args.buffer_start
+    data_cfg["data"]["end"] = args.as_of
+    price_data, benchmark_close = _load_price_data(data_cfg)
+
+    with open(run_dir / "regime_model.json") as f:
+        regime_json = json.load(f)
+    with open(run_dir / "volatility_model.json") as f:
+        volatility_json = json.load(f)
+    with open(run_dir / "feature_schema.json") as f:
+        schema = json.load(f)
+
+    blocks = frozenset(cfg["ablation"]["feature_blocks"])
+    pullback_cfg = PullbackConfig(**cfg["pullback"])
+    n_features = len(schema["columns"])
+    gru_cfg = GRUConfig(n_features=n_features, **cfg["model"])
+    model = TakeSkipGRU(gru_cfg.n_features, gru_cfg.hidden_size, gru_cfg.dropout).to(device)
+    model.load_state_dict(torch.load(run_dir / "model.pt", map_location=device))
+    model.eval()
+    threshold = metadata["selected_threshold"]
+
+    as_of_ts = pd.Timestamp(args.as_of)
+    next_session = (as_of_ts + pd.tseries.offsets.BDay(1)).date().isoformat()
+
+    predictions = []
+    for ticker, ohlc in price_data.items():
+        if as_of_ts not in ohlc.index:
+            predictions.append({
+                "ticker": ticker, "as_of": args.as_of, "next_session": next_session,
+                "status": "no_data",
+                "note": f"No price bar for {ticker} on {args.as_of} (holiday/weekend/no data yet) - "
+                        f"can't evaluate the entry rules for this date.",
+            })
+            continue
+
+        regime_model = _hmm_from_json(regime_json[ticker]) if ticker in regime_json else None
+        volatility_model = _garch_from_json(volatility_json[ticker]) if ticker in volatility_json else None
+        feature_frame = build_feature_frame(
+            ohlc["close"], blocks,
+            regime_model=regime_model,
+            volatility_model=volatility_model,
+        )[schema["columns"]]
+        detail = candidate_signal_detail(ohlc["close"], benchmark_close, ohlc["high"], pullback_cfg)
+        row = detail.loc[as_of_ts]
+        rule_cols = [c for c in detail.columns if c not in ("candidate", "rules_passed")]
+        failed_rules = [c for c in rule_cols if not bool(row[c])]
+        candidate_today = bool(row["candidate"])
+        rules_passed = int(row["rules_passed"])
+
+        take_prob = None
+        if as_of_ts in feature_frame.index:
+            pos = feature_frame.index.get_loc(as_of_ts)
+            if pos - schema["lookback"] + 1 >= 0:
+                window = feature_frame.iloc[pos - schema["lookback"] + 1: pos + 1].to_numpy(dtype=np.float32)
+                with torch.no_grad():
+                    logit = model(torch.from_numpy(window).unsqueeze(0).to(device))
+                    take_prob = float(model.take_prob(logit).item())
+
+        if not candidate_today:
+            reasons = "; ".join(RULE_DESCRIPTIONS[r] + " - FAILED" for r in failed_rules)
+            decision = "NO BUY"
+            reason_text = (
+                f"Only {rules_passed}/5 entry rules passed on {args.as_of} "
+                f"(need >= {pullback_cfg.min_rules_required}), so nothing would be bought at "
+                f"{next_session}'s open. Failed rule(s): {reasons}."
+            )
+            if take_prob is not None:
+                reason_text += (
+                    f" (For reference, the model's take-probability on this window is {take_prob:.1%}, "
+                    f"but it's not meaningful here - the model was only trained on windows that cleared "
+                    f"the min_rules_required bar.)"
+                )
+        elif take_prob is None:
+            decision = "NO BUY"
+            reason_text = (
+                f"The pullback-entry pattern fired on {args.as_of} ({rules_passed}/5 rules passed, "
+                f">= min_rules_required={pullback_cfg.min_rules_required}), but there isn't enough "
+                f"price history yet to build the model's lookback window, so no probability can be "
+                f"computed - treat as not confirmed."
+            )
+        elif take_prob >= threshold:
+            decision = "BUY"
+            reason_text = (
+                f"Entry signal confirmed on {args.as_of} ({rules_passed}/5 pullback rules passed, "
+                f"meeting min_rules_required={pullback_cfg.min_rules_required}). The model's "
+                f"take-probability is {take_prob:.1%}, at or above the selected threshold of "
+                f"{threshold:.1%}, so the strategy would buy at the open on {next_session}."
+            )
+        else:
+            decision = "NO BUY"
+            reason_text = (
+                f"The pullback-entry pattern fired on {args.as_of} ({rules_passed}/5 rules passed), "
+                f"but the model's take-probability is only {take_prob:.1%}, below the selected "
+                f"threshold of {threshold:.1%}. The model isn't confident this particular setup has "
+                f"positive edge, so the strategy would skip buying at {next_session}'s open."
+            )
+
+        predictions.append({
+            "ticker": ticker, "as_of": args.as_of, "next_session": next_session,
+            "status": "ok", "candidate_signal": candidate_today, "rules_passed": rules_passed,
+            "min_rules_required": pullback_cfg.min_rules_required,
+            "rules": {c: bool(row[c]) for c in rule_cols},
+            "take_prob": take_prob, "threshold": threshold,
+            "decision": decision, "reason": reason_text,
+        })
+
+    out_dir = run_dir / "predictions"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{args.as_of}.json"
+    with open(out_path, "w") as f:
+        json.dump(predictions, f, indent=2)
+
+    for p in predictions:
+        if p["status"] == "ok":
+            prob_str = f"{p['take_prob']:.4f}" if p["take_prob"] is not None else "n/a"
+            print(f"predict-next\t{p['ticker']}\tas_of={p['as_of']}\tnext_session={p['next_session']}\t"
+                  f"candidate={p['candidate_signal']}\trules_passed={p['rules_passed']}/5\t"
+                  f"take_prob={prob_str}\tdecision={p['decision']}")
+        else:
+            print(f"predict-next\t{p['ticker']}\t{p['status']}: {p['note']}")
+    print(f"predict-next: wrote {out_path}")
+
+
+# ---------------------------------------------------------------------------
 # argparse wiring
 # ---------------------------------------------------------------------------
 
@@ -789,6 +1020,17 @@ def main() -> None:
     p.add_argument("--as-of", required=True)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.set_defaults(func=cmd_signals)
+
+    p = sub.add_parser("predict-next")
+    p.add_argument("--run-id", required=True)
+    p.add_argument("--buffer-start", required=True,
+                    help="start of the fresh data pull - earlier than --as-of to give "
+                         "indicators/lookback a warm-up buffer")
+    p.add_argument("--as-of", required=True,
+                    help="the last known trading day (e.g. the test/holdout window's end date); "
+                         "the prediction is for the NEXT trading session after this date")
+    p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    p.set_defaults(func=cmd_predict_next)
 
     args = parser.parse_args()
     args.func(args)

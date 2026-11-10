@@ -19,16 +19,26 @@ def _trailing_return(close: pd.Series, window: int) -> pd.Series:
     return close.pct_change(window)
 
 
-def candidate_signal(
+RULE_DESCRIPTIONS = {
+    "rule1_benchmark_trend": "benchmark is above its own moving average (market-wide uptrend)",
+    "rule2_stock_trend": "the stock itself is above its moving average (stock is in an uptrend)",
+    "rule3_rel_strength": "the stock's trailing return beats the benchmark's (relative strength)",
+    "rule4_pullback": "price made a recent high and has since pulled back below it",
+    "rule5_trigger": "today's close broke back above yesterday's high (pullback resolved, trigger fired)",
+}
+
+
+def candidate_signal_detail(
     stock_close: pd.Series,
     benchmark_close: pd.Series,
     stock_high: pd.Series,
     cfg: PullbackConfig = PullbackConfig(),
-) -> pd.Series:
-    """Returns a boolean Series aligned to stock_close.index: True on days
-    where at least `cfg.min_rules_required` of the 5 entry rules fire
-    (default 5 = original strict AND of all of them). stock_high must be the
-    stock's own daily high (for rule 5, today's close vs yesterday's high)."""
+) -> pd.DataFrame:
+    """Same five entry rules as `candidate_signal`, but returns every rule's
+    boolean column, the count of rules passed, and the combined `candidate`
+    column (rules_passed >= cfg.min_rules_required) - so a caller can explain
+    *why* a given day did or didn't fire. Used by cli.py's predict-next
+    command to justify a buy / no-buy call in plain text."""
     stock_close, benchmark_close, stock_high = (
         s.reindex(stock_close.index) for s in (stock_close, benchmark_close, stock_high)
     )
@@ -56,10 +66,26 @@ def candidate_signal(
 
     rule5_trigger = stock_close > stock_high.shift(1)
 
-    rules = [
-        rule1_benchmark_trend, rule2_stock_trend, rule3_rel_strength,
-        rule4_pullback, rule5_trigger,
-    ]
-    rules_true_count = sum(r.fillna(False).astype(int) for r in rules)
-    candidate = rules_true_count >= cfg.min_rules_required
-    return candidate.fillna(False)
+    detail = pd.DataFrame({
+        "rule1_benchmark_trend": rule1_benchmark_trend,
+        "rule2_stock_trend": rule2_stock_trend,
+        "rule3_rel_strength": rule3_rel_strength,
+        "rule4_pullback": rule4_pullback,
+        "rule5_trigger": rule5_trigger,
+    }).fillna(False)
+    detail["rules_passed"] = detail.sum(axis=1)
+    detail["candidate"] = detail["rules_passed"] >= cfg.min_rules_required
+    return detail
+
+
+def candidate_signal(
+    stock_close: pd.Series,
+    benchmark_close: pd.Series,
+    stock_high: pd.Series,
+    cfg: PullbackConfig = PullbackConfig(),
+) -> pd.Series:
+    """Returns a boolean Series aligned to stock_close.index: True on days
+    where at least `cfg.min_rules_required` of the 5 entry rules fire
+    (default 5 = original strict AND of all of them). stock_high must be the
+    stock's own daily high (for rule 5, today's close vs yesterday's high)."""
+    return candidate_signal_detail(stock_close, benchmark_close, stock_high, cfg)["candidate"]
