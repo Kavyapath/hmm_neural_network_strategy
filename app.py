@@ -53,6 +53,18 @@ MODE_TO_BLOCKS = {
 
 st.set_page_config(page_title="Strategy Lab", layout="wide")
 
+# On Streamlit Community Cloud, secrets entered in the app's "Secrets" settings
+# land in st.secrets, not in os.environ — and cli.py (launched below as a plain
+# subprocess) only inherits os.environ. Copy them across once at startup so both
+# this process and every subprocess call see ALPACA_API_KEY_ID / _SECRET_KEY.
+# Locally, st.secrets is just empty/missing (no secrets.toml) and this is a no-op;
+# real_data.py's own env-var/.env-file lookup still works unchanged.
+try:
+    for _k, _v in st.secrets.items():
+        os.environ.setdefault(_k, str(_v))
+except Exception:
+    pass
+
 
 # ---------------------------------------------------------------------------
 # helpers
