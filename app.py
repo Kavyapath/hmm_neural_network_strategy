@@ -142,12 +142,18 @@ def render_report(run_dir: Path, reports_subdir: str, label: str) -> None:
         return
 
     row = metrics.iloc[0]
-    cols = st.columns(5)
+    cols = st.columns(6)
     cols[0].metric("Test accuracy", f"{row['test_accuracy']:.3f}" if pd.notna(row["test_accuracy"]) else "n/a")
     cols[1].metric("Expectancy / trade", f"{row['test_expectancy']:.4f}" if pd.notna(row["test_expectancy"]) else "n/a")
     cols[2].metric("Final equity", f"${row['final_equity']:,.0f}")
     cols[3].metric("Max drawdown", f"{row['max_drawdown']:.2%}")
-    cols[4].metric("Benchmark return", f"{row['benchmark_return']:.2%}")
+    sharpe = row["sharpe_ratio"] if "sharpe_ratio" in row and pd.notna(row["sharpe_ratio"]) else None
+    cols[4].metric("Sharpe ratio", f"{sharpe:.2f}" if sharpe is not None else "n/a",
+                   help="Annualized Sharpe ratio of the equity curve's daily returns (mean / std, "
+                        "scaled by sqrt(252)), risk-free rate = 0. Higher is better; above ~1 is "
+                        "considered decent for a systematic strategy. 'n/a' means the test window "
+                        "was too short or had too few return observations to compute it.")
+    cols[5].metric("Benchmark return", f"{row['benchmark_return']:.2%}")
     st.caption(f"n_test_trades={row['n_test_trades']}  |  n_admitted_portfolio={row['n_admitted_portfolio']}  |  "
                f"selected_threshold={row['selected_threshold']}")
 
@@ -759,6 +765,35 @@ with tab_predict:
             else:
                 st.error(f"**NO BUY — not an entry signal for {p['next_session']}.**")
             st.write(p["reason"])
+
+            plan = p.get("trade_plan")
+            if plan is not None:
+                st.markdown("**Trade plan**")
+                plan_cols = st.columns(3)
+                plan_cols[0].metric(
+                    "Est. entry price",
+                    f"${plan['est_entry_price']:,.2f}",
+                    help=plan["est_entry_note"],
+                )
+                plan_cols[1].metric(
+                    "Stop loss",
+                    f"${plan['stop_loss_price']:,.2f}",
+                    delta=f"{plan['stop_loss_pct']:.2%}",
+                    delta_color="inverse",
+                    help="Price (and % below estimated entry) at which the trade exits for a loss.",
+                )
+                plan_cols[2].metric(
+                    "Take profit",
+                    f"${plan['take_profit_price']:,.2f}",
+                    delta=f"{plan['take_profit_pct']:.2%}",
+                    help="Price (and % above estimated entry) at which the trade exits for a gain.",
+                )
+                st.caption(
+                    f"Prices are estimates based on {plan['est_entry_note']}; the actual fill at "
+                    f"{p['next_session']}'s open will differ slightly, but the stop/target *percentages* "
+                    "are fixed by the trade-sim config (ATR-based stop, R-multiple target) and don't "
+                    "depend on the exact entry price."
+                )
 
             with st.expander("Rule-by-rule breakdown"):
                 for rule, passed in p["rules"].items():

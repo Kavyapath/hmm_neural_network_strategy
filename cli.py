@@ -485,6 +485,21 @@ def _write_outcome_variance_report(
     plt.close(fig)
 
 
+def _sharpe_ratio(equity_curve: pd.Series, periods_per_year: int = 252) -> float | None:
+    """Annualized Sharpe ratio (mean / std of simple daily returns, scaled by
+    sqrt(252)), computed off the event-driven equity curve written for the
+    equity/drawdown charts above. Risk-free rate is treated as 0, which is
+    standard for a short backtest window. None if there's too little history
+    (fewer than 2 return observations, or zero variance) to make the ratio
+    meaningful rather than a number dominated by noise."""
+    if len(equity_curve) < 3:
+        return None
+    daily_returns = equity_curve.pct_change().dropna()
+    if len(daily_returns) < 2 or daily_returns.std() == 0:
+        return None
+    return float(daily_returns.mean() / daily_returns.std() * np.sqrt(periods_per_year))
+
+
 def _attach_portfolio_columns(
     trades: pd.DataFrame, price_data: dict[str, pd.DataFrame], sim_cfg: TradeSimConfig, take_probs: np.ndarray
 ) -> pd.DataFrame:
@@ -576,6 +591,7 @@ def cmd_evaluate(args: argparse.Namespace) -> None:
     equity_curve = result["equity_curve"] if result else pd.Series(dtype=float)
     final_equity = result["final_equity"] if result else portfolio_cfg.starting_cash
     max_drawdown = float((equity_curve / equity_curve.cummax() - 1).min()) if len(equity_curve) else 0.0
+    sharpe_ratio = _sharpe_ratio(equity_curve)
 
     reports_dir = run_dir / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
@@ -585,7 +601,8 @@ def cmd_evaluate(args: argparse.Namespace) -> None:
         "n_test_trades": len(test_trades), "n_admitted_portfolio": result["n_admitted"] if result else 0,
         "selected_threshold": threshold, "test_accuracy": test_accuracy, "test_expectancy": test_expectancy,
         "label_precision": label_precision, "profit_rate": profit_rate,
-        "final_equity": final_equity, "max_drawdown": max_drawdown, "benchmark_return": benchmark_return,
+        "final_equity": final_equity, "max_drawdown": max_drawdown, "sharpe_ratio": sharpe_ratio,
+        "benchmark_return": benchmark_return,
     }])
     fold_metrics.to_csv(reports_dir / "fold_metrics.csv", index=False)
     _write_trades_csv(reports_dir / "accepted_trades.csv", accepted, accepted_probs)
@@ -711,6 +728,7 @@ def cmd_evaluate_holdout(args: argparse.Namespace) -> None:
     equity_curve = result["equity_curve"] if result else pd.Series(dtype=float)
     final_equity = result["final_equity"] if result else portfolio_cfg.starting_cash
     max_drawdown = float((equity_curve / equity_curve.cummax() - 1).min()) if len(equity_curve) else 0.0
+    sharpe_ratio = _sharpe_ratio(equity_curve)
 
     fold_name = f"holdout_{args.test_start}_{args.test_end}"
     reports_dir = run_dir / f"reports_{fold_name}"
@@ -721,7 +739,8 @@ def cmd_evaluate_holdout(args: argparse.Namespace) -> None:
         "n_test_trades": len(test_trades), "n_admitted_portfolio": result["n_admitted"] if result else 0,
         "selected_threshold": threshold, "test_accuracy": test_accuracy, "test_expectancy": test_expectancy,
         "label_precision": label_precision, "profit_rate": profit_rate,
-        "final_equity": final_equity, "max_drawdown": max_drawdown, "benchmark_return": benchmark_return,
+        "final_equity": final_equity, "max_drawdown": max_drawdown, "sharpe_ratio": sharpe_ratio,
+        "benchmark_return": benchmark_return,
     }])
     fold_metrics.to_csv(reports_dir / "fold_metrics.csv", index=False)
     _write_trades_csv(reports_dir / "accepted_trades.csv", accepted, accepted_probs)
@@ -762,7 +781,7 @@ def cmd_evaluate_holdout(args: argparse.Namespace) -> None:
     print(f"evaluate-holdout: {fold_name} | n_test_trades={len(test_trades)} "
           f"test_accuracy={test_accuracy} test_expectancy={test_expectancy} "
           f"final_equity={final_equity:.2f} max_drawdown={max_drawdown:.4f} "
-          f"benchmark_return={benchmark_return:.4f}")
+          f"sharpe_ratio={sharpe_ratio} benchmark_return={benchmark_return:.4f}")
     print(f"evaluate-holdout: wrote reports to {reports_dir}")
 
 
@@ -877,6 +896,7 @@ def cmd_predict_next(args: argparse.Namespace) -> None:
 
     as_of_ts = pd.Timestamp(args.as_of)
     next_session = (as_of_ts + pd.tseries.offsets.BDay(1)).date().isoformat()
+    sim_cfg = TradeSimConfig(**cfg["trade_sim"])
 
     predictions = []
     for ticker, ohlc in price_data.items():
@@ -904,6 +924,7 @@ def cmd_predict_next(args: argparse.Namespace) -> None:
         rules_passed = int(row["rules_passed"])
 
         take_prob = None
+        trade_plan = None
         if as_of_ts in feature_frame.index:
             pos = feature_frame.index.get_loc(as_of_ts)
             if pos - schema["lookback"] + 1 >= 0:
@@ -936,11 +957,33 @@ def cmd_predict_next(args: argparse.Namespace) -> None:
             )
         elif take_prob >= threshold:
             decision = "BUY"
+            # Actual entry is the NEXT session's open (see trade_simulation.py), which hasn't
+            # happened yet - so stop/target here use the as-of close as an ENTRY ESTIMATE, flagged
+            # as such. stop/target distances themselves are a fixed multiple of ATR, so the percent
+            # figures are a solid estimate even though the exact entry price isn't known yet.
+            atr_series = average_true_range(ohlc["high"], ohlc["low"], ohlc["close"], sim_cfg.atr_window)
+            atr_at_as_of = float(atr_series.loc[as_of_ts])
+            est_entry = float(ohlc["close"].loc[as_of_ts])
+            stop_distance = sim_cfg.stop_atr_mult * atr_at_as_of
+            est_stop_price = est_entry - stop_distance
+            est_target_price = est_entry + sim_cfg.target_r_mult * stop_distance
+            stop_loss_pct = -stop_distance / est_entry
+            take_profit_pct = sim_cfg.target_r_mult * stop_distance / est_entry
+            trade_plan = {
+                "est_entry_price": est_entry,
+                "est_entry_note": f"estimated from {args.as_of}'s close; real entry is {next_session}'s open",
+                "stop_loss_price": est_stop_price, "stop_loss_pct": stop_loss_pct,
+                "take_profit_price": est_target_price, "take_profit_pct": take_profit_pct,
+            }
             reason_text = (
                 f"Entry signal confirmed on {args.as_of} ({rules_passed}/5 pullback rules passed, "
                 f"meeting min_rules_required={pullback_cfg.min_rules_required}). The model's "
                 f"take-probability is {take_prob:.1%}, at or above the selected threshold of "
-                f"{threshold:.1%}, so the strategy would buy at the open on {next_session}."
+                f"{threshold:.1%}, so the strategy would buy at the open on {next_session}. "
+                f"Using {args.as_of}'s close (${est_entry:.2f}) as an estimate for that entry price "
+                f"(the real entry is {next_session}'s open, not yet known): stop-loss at "
+                f"${est_stop_price:.2f} ({stop_loss_pct:+.2%}), take-profit at ${est_target_price:.2f} "
+                f"({take_profit_pct:+.2%})."
             )
         else:
             decision = "NO BUY"
@@ -957,7 +1000,7 @@ def cmd_predict_next(args: argparse.Namespace) -> None:
             "min_rules_required": pullback_cfg.min_rules_required,
             "rules": {c: bool(row[c]) for c in rule_cols},
             "take_prob": take_prob, "threshold": threshold,
-            "decision": decision, "reason": reason_text,
+            "decision": decision, "reason": reason_text, "trade_plan": trade_plan,
         })
 
     out_dir = run_dir / "predictions"
