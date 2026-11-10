@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# per-run artifacts and generated configs - not source
+runs/*
+!runs/.gitkeep
+configs/*
+!configs/.gitkeep
+
+# never commit real credentials
+.env
+.streamlit/secrets.toml

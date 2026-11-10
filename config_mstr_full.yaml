@@ -1,0 +1,57 @@
+# MSTR, full mode (technical + regime + volatility). Data starts 2020-07-27 on
+# Alpaca's feed (checked via `python real_data.py MSTR 2010-01-01 2026-11-07`),
+# so the warm-up indicators (ma_window=50, lookback=30 trading days) consume
+# their buffer from the start of the train window itself.
+data:
+  source: "alpaca"
+  tickers: ["MSTR"]
+  benchmark: "SPY"
+  start: "2020-07-27"
+  end: "2026-11-06"
+
+regime:
+  n_states: 3
+
+pullback:
+  ma_window: 50
+  rel_strength_window: 20
+  pullback_window: 3
+  prior_high_lookback: 10
+
+trade_sim:
+  atr_window: 14
+  stop_atr_mult: 1.5
+  target_r_mult: 2.0
+  max_holding_sessions: 7
+  commission_bps: 1.0
+  slippage_bps: 2.0
+
+model:
+  lookback: 30
+  hidden_size: 32
+  dropout: 0.1
+  lr: 0.001
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  max_epochs: 50
+  patience: 5
+  seed: 42
+
+walk_forward:
+  # Lowered from 20: a single ticker over ~3.4 train years only fires 19
+  # candidate pullback signals - the default (tuned for multi-ticker configs)
+  # would always report "insufficient data" here. Threshold selection on this
+  # few trades is noisier than the multi-ticker runs - treat results as
+  # indicative, not a reliable backtest.
+  min_trades_for_threshold: 10
+  threshold_grid: [0.3, 0.9, 25]
+
+portfolio:
+  starting_cash: 100000.0
+  risk_pct_per_trade: 0.01
+  max_position_pct: 0.20
+  max_concurrent_trades: 5
+  max_aggregate_risk_pct: 0.06
+
+ablation:
+  feature_blocks: ["technical", "regime", "volatility"]

@@ -1,0 +1,66 @@
+data:
+  tickers: ["INTC", "NVDA"]
+  benchmark: "SPY"
+  start: "2011-01-01"
+  end: "2025-01-01"
+  seed: 0   # synthetic_data.py's only data source right now — see README limitations
+
+regime:
+  n_states: 3
+
+pullback:
+  # Grid-searched against synthetic_data.py's generator (see
+  # STRATEGY_BLUEPRINT.md) for max candidate density: all 5 candidate_signal
+  # rules must fire on the SAME day (AND, not OR), and each rule's own pass
+  # rate barely moves with window size — shrinking windows shifts WHICH days
+  # each rule is true on, not how often, so naive shrinking (e.g. ma_window=10)
+  # can produce FEWER candidates than this, not more. This combo was verified
+  # to actually maximize candidate count, not just assumed to.
+  ma_window: 30
+  rel_strength_window: 10
+  pullback_window: 3
+  prior_high_lookback: 3
+  # 4-of-5 instead of strict 5-of-5 AND — measured to meaningfully raise
+  # candidate count on real tickers (low-priced, high-%-ATR names tend to
+  # satisfy all 5 already; this mainly helps lower-volatility names like
+  # AAPL clear the bar more often). Set back to 5 for the original strict rule.
+  min_rules_required: 4
+
+trade_sim:
+  atr_window: 7
+  # 2.5, not 1.0 — measured against real ATR%: AAPL's ATR is only ~2% of
+  # price, and portfolio sizing requires stop_distance >= risk_pct_per_trade
+  # / max_position_pct = 0.01/0.20 = 5% of price, or shares get sized so
+  # large that notional blows past max_position_pct and the trade never
+  # gets admitted. 2.5x covers AAPL/NVDA/INTC's actual ATR% with margin —
+  # see CHANGES_PORTFOLIO_SIZING_FIX.md for the numbers this was measured from.
+  stop_atr_mult: 2.5
+  target_r_mult: 1.5
+  max_holding_sessions: 3
+  commission_bps: 1.0
+  slippage_bps: 2.0
+
+model:
+  lookback: 30
+  hidden_size: 32
+  dropout: 0.1
+  lr: 0.001
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  max_epochs: 50
+  patience: 5
+  seed: 42
+
+walk_forward:
+  min_trades_for_threshold: 10
+  threshold_grid: [0.2, 0.9, 25]   # np.linspace args — lower floor since frequent trading generates more, weaker-edge candidates
+
+portfolio:
+  starting_cash: 100000.0
+  risk_pct_per_trade: 0.01
+  max_position_pct: 0.20
+  max_concurrent_trades: 5
+  max_aggregate_risk_pct: 0.06
+
+ablation:
+  feature_blocks: ["technical", "regime", "volatility"]   # toggled per variant internally

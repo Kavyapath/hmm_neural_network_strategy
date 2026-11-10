@@ -1,0 +1,53 @@
+# Even larger synthetic sanity check: 20 tickers, 30 years, and the
+# hidden_size/lr picked by the Step 8 config search (64 / 3e-4) run on the
+# 10-ticker/24-year dataset. Still NOT real data — see config_big.yaml's
+# and README.md's notes on what this is and isn't evidence of.
+data:
+  tickers: ["T0","T1","T2","T3","T4","T5","T6","T7","T8","T9",
+             "T10","T11","T12","T13","T14","T15","T16","T17","T18","T19"]
+  benchmark: "SYN_BENCH"
+  start: "1995-01-01"
+  end: "2025-01-01"
+  seed: 0
+
+regime:
+  n_states: 3
+
+pullback:
+  ma_window: 50
+  rel_strength_window: 20
+  pullback_window: 3
+  prior_high_lookback: 10
+
+trade_sim:
+  atr_window: 14
+  stop_atr_mult: 1.5
+  target_r_mult: 2.0
+  max_holding_sessions: 7
+  commission_bps: 1.0
+  slippage_bps: 2.0
+
+model:
+  lookback: 20
+  hidden_size: 64
+  dropout: 0.1
+  lr: 0.0003
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  max_epochs: 60
+  patience: 8
+  seed: 42
+
+walk_forward:
+  min_trades_for_threshold: 80
+  threshold_grid: [0.3, 0.9, 25]
+
+portfolio:
+  starting_cash: 100000.0
+  risk_pct_per_trade: 0.01
+  max_position_pct: 1.0
+  max_concurrent_trades: 15
+  max_aggregate_risk_pct: 0.15
+
+ablation:
+  feature_blocks: ["technical", "regime", "volatility"]

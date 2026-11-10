@@ -1,0 +1,53 @@
+# Real-ticker config. Requires network access to Yahoo Finance from
+# wherever this is run — this sandbox's outbound network is rate-limited
+# by Yahoo (HTTP 429), so this has not been run successfully from here.
+# Run `python real_data.py AAPL 2015-01-01 2016-01-01` first to confirm
+# your environment can actually reach Yahoo before using this config.
+data:
+  source: "yfinance"
+  tickers: ["AAPL", "NVDA"]
+  benchmark: "SPY"
+  start: "2011-01-01"
+  end: "2025-01-01"
+
+regime:
+  n_states: 3
+
+pullback:
+  ma_window: 50
+  rel_strength_window: 20
+  pullback_window: 3
+  prior_high_lookback: 10
+
+trade_sim:
+  atr_window: 14
+  stop_atr_mult: 1.5
+  target_r_mult: 2.0
+  max_holding_sessions: 7
+  commission_bps: 1.0
+  slippage_bps: 2.0
+
+model:
+  lookback: 30
+  hidden_size: 32
+  dropout: 0.1
+  lr: 0.001
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  max_epochs: 50
+  patience: 5
+  seed: 42
+
+walk_forward:
+  min_trades_for_threshold: 20
+  threshold_grid: [0.3, 0.9, 25]
+
+portfolio:
+  starting_cash: 100000.0
+  risk_pct_per_trade: 0.01
+  max_position_pct: 0.20
+  max_concurrent_trades: 5
+  max_aggregate_risk_pct: 0.06
+
+ablation:
+  feature_blocks: ["technical", "regime", "volatility"]
