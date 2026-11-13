@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -151,6 +152,13 @@ def plot_heteroscedasticity(
 
     returns = close.pct_change().dropna()
     features = build_volatility_features(close, model, periods_per_year=periods_per_year)
+
+    csv_path = Path(out_path).with_suffix(".csv")
+    pd.DataFrame({
+        "date": features.index,
+        "daily_return": returns.reindex(features.index).to_numpy(),
+        "garch_vol_fcst": features["garch_vol_fcst"].to_numpy(),
+    }).to_csv(csv_path, index=False)
 
     fig, (ax_ret, ax_vol) = plt.subplots(2, 1, sharex=True, figsize=(10, 6))
     ax_ret.plot(returns.index, returns.to_numpy(), linewidth=0.6, color="tab:blue")

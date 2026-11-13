@@ -27,6 +27,7 @@ import urllib.request
 from datetime import date, timedelta
 from pathlib import Path
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 import yaml
@@ -146,6 +147,269 @@ def load_csv(path: Path) -> pd.DataFrame | None:
     return pd.read_csv(path) if path.exists() else None
 
 
+def _section_controls(state_prefix: str, track_idx_keys: list[str]) -> bool:
+    """One Play/Pause/Reset control for a whole section's charts, so the
+    section needs exactly one st.fragment(run_every=...) timer instead of one
+    per chart - independent run_every fragments execute sequentially, so many
+    of them on one page compete for the same slot and stutter badly."""
+    play_key = f"{state_prefix}_playing"
+    st.session_state.setdefault(play_key, True)
+    for k in track_idx_keys:
+        st.session_state.setdefault(k, 0)
+    playing = st.session_state[play_key]
+    c1, c2 = st.columns([1, 1])
+    if c1.button(
+        "Pause" if playing else "Play", key=f"{state_prefix}_toggle",
+        icon=":material/pause:" if playing else ":material/play_arrow:",
+    ):
+        st.session_state[play_key] = not playing
+        playing = st.session_state[play_key]
+    if c2.button("Reset", key=f"{state_prefix}_reset", icon=":material/restart_alt:"):
+        for k in track_idx_keys:
+            st.session_state[k] = 0
+        st.session_state[play_key] = True
+        playing = True
+    return playing
+
+
+def _track_frame(idx_key: str, n_frames: int, playing: bool, step: int = 1) -> int:
+    """Current frame for one chart 'track' inside a section; advances `step`
+    frames per section tick and loops back to the start at the end."""
+    frame = min(st.session_state.get(idx_key, 0), max(n_frames - 1, 0))
+    if playing and n_frames > 0:
+        st.session_state[idx_key] = (frame + step) % n_frames
+    return frame
+
+
+def _draw_training_curves(history: dict, frame: int) -> None:
+    n = len(history["train_loss"])
+    epochs = list(range(1, frame + 2))
+    st.caption(f"Epoch {frame + 1} / {n}")
+
+    loss_long = pd.DataFrame({
+        "epoch": epochs * 2,
+        "loss": history["train_loss"][: frame + 1] + history["val_loss"][: frame + 1],
+        "series": ["train_loss"] * (frame + 1) + ["val_loss"] * (frame + 1),
+    })
+    max_loss = max(history["train_loss"] + history["val_loss"]) * 1.1
+    loss_chart = (
+        alt.Chart(loss_long)
+        .mark_line()
+        .encode(
+            x=alt.X("epoch:Q", scale=alt.Scale(domain=[1, n]), title="epoch"),
+            y=alt.Y("loss:Q", scale=alt.Scale(domain=[0, max_loss])),
+            color=alt.Color("series:N", title=None),
+        )
+        .properties(height=220)
+    )
+    st.altair_chart(loss_chart, width="stretch",
+                     alt=f"Training and validation loss through epoch {frame + 1} of {n}")
+
+    acc_long = pd.DataFrame({
+        "epoch": epochs * 2,
+        "accuracy": history["train_acc"][: frame + 1] + history["val_acc"][: frame + 1],
+        "series": ["train_acc"] * (frame + 1) + ["val_acc"] * (frame + 1),
+    })
+    acc_chart = (
+        alt.Chart(acc_long)
+        .mark_line()
+        .encode(
+            x=alt.X("epoch:Q", scale=alt.Scale(domain=[1, n]), title="epoch"),
+            y=alt.Y("accuracy:Q", scale=alt.Scale(domain=[0, 1])),
+            color=alt.Color("series:N", title=None),
+        )
+        .properties(height=220)
+    )
+    chance_line = (
+        alt.Chart(pd.DataFrame({"y": [0.5]}))
+        .mark_rule(strokeDash=[4, 4], color="gray")
+        .encode(y="y:Q")
+    )
+    st.altair_chart(acc_chart + chance_line, width="stretch",
+                     alt=f"Training and validation accuracy through epoch {frame + 1} of {n}")
+
+
+def _draw_loss_variance(history: dict, frame: int) -> None:
+    n = len(history["train_loss_std"])
+    epochs = list(range(1, frame + 2))
+    long_df = pd.DataFrame({
+        "epoch": epochs * 2,
+        "loss_std": history["train_loss_std"][: frame + 1] + history["val_loss_std"][: frame + 1],
+        "series": ["train_loss_std"] * (frame + 1) + ["val_loss_std"] * (frame + 1),
+    })
+    y_max = max(history["train_loss_std"] + history["val_loss_std"]) * 1.1
+    chart = (
+        alt.Chart(long_df)
+        .mark_line()
+        .encode(
+            x=alt.X("epoch:Q", scale=alt.Scale(domain=[1, n]), title="epoch"),
+            y=alt.Y("loss_std:Q", scale=alt.Scale(domain=[0, y_max]), title="std(per-trade loss)"),
+            color=alt.Color("series:N", title=None),
+        )
+        .properties(height=220)
+    )
+    st.altair_chart(chart, width="stretch",
+                     alt=f"Per-trade loss variance per epoch through epoch {frame + 1} of {n}")
+
+
+def _draw_equity_curve(equity: pd.Series, title: str, frame: int) -> None:
+    n = len(equity)
+    sliced = equity.iloc[: frame + 1]
+    full_drawdown = equity / equity.cummax() - 1
+    drawdown = sliced / sliced.cummax() - 1
+    st.caption(f"{title} - {sliced.index[-1].date()} ({frame + 1}/{n})")
+
+    equity_df = pd.DataFrame({"date": sliced.index, "equity": sliced.to_numpy()})
+    equity_chart = (
+        alt.Chart(equity_df)
+        .mark_line(color="#00cc96")
+        .encode(
+            x=alt.X("date:T", scale=alt.Scale(domain=[equity.index[0], equity.index[-1]])),
+            y=alt.Y("equity:Q", scale=alt.Scale(domain=[equity.min() * 0.98, equity.max() * 1.02])),
+        )
+        .properties(height=220)
+    )
+    st.altair_chart(equity_chart, width="stretch",
+                     alt=f"{title} equity through day {frame + 1} of {n}")
+
+    drawdown_df = pd.DataFrame({"date": drawdown.index, "drawdown": drawdown.to_numpy()})
+    drawdown_chart = (
+        alt.Chart(drawdown_df)
+        .mark_area(color="#ef553b", opacity=0.5, line={"color": "#ef553b"})
+        .encode(
+            x=alt.X("date:T", scale=alt.Scale(domain=[equity.index[0], equity.index[-1]])),
+            y=alt.Y("drawdown:Q", scale=alt.Scale(domain=[min(full_drawdown.min(), -0.01), 0.01])),
+        )
+        .properties(height=160)
+    )
+    st.altair_chart(drawdown_chart, width="stretch",
+                     alt=f"{title} drawdown through day {frame + 1} of {n}")
+
+
+def _draw_bucket_bar(df: pd.DataFrame, bucket_col: str, value_col: str, y_label: str, title: str, frame: int) -> None:
+    n = len(df)
+    sliced = df.iloc[: frame + 1]
+    y_max = df[value_col].max() * 1.15 if df[value_col].max() > 0 else 1.0
+    chart = (
+        alt.Chart(sliced)
+        .mark_bar(color="#F58518")
+        .encode(
+            x=alt.X(f"{bucket_col}:N", sort=list(df[bucket_col]), title="take_prob bucket (low -> high)"),
+            y=alt.Y(f"{value_col}:Q", scale=alt.Scale(domain=[0, y_max]), title=y_label),
+        )
+        .properties(height=220, title=title)
+    )
+    st.altair_chart(chart, width="stretch", alt=f"{title} through bucket {frame + 1} of {n}")
+
+
+def _draw_timeseries_pair(
+    df: pd.DataFrame, date_col: str, col_a: str, col_b: str, label_a: str, label_b: str, title: str, frame: int,
+) -> None:
+    n = len(df)
+    sliced = df.iloc[: frame + 1]
+    x_domain = [df[date_col].iloc[0], df[date_col].iloc[-1]]
+    st.caption(f"{title} - {pd.Timestamp(sliced[date_col].iloc[-1]).date()} ({frame + 1}/{n})")
+
+    a_max = float(df[col_a].abs().max()) * 1.1 or 1.0
+    a_chart = (
+        alt.Chart(sliced)
+        .mark_line(color="#636efa", strokeWidth=0.8)
+        .encode(
+            x=alt.X(f"{date_col}:T", scale=alt.Scale(domain=x_domain), title="date"),
+            y=alt.Y(f"{col_a}:Q", scale=alt.Scale(domain=[-a_max, a_max]), title=label_a),
+        )
+        .properties(height=160)
+    )
+    st.altair_chart(a_chart, width="stretch", alt=f"{label_a} through day {frame + 1} of {n}")
+
+    b_max = float(df[col_b].max()) * 1.1 or 1.0
+    b_chart = (
+        alt.Chart(sliced)
+        .mark_line(color="#ef553b")
+        .encode(
+            x=alt.X(f"{date_col}:T", scale=alt.Scale(domain=x_domain), title="date"),
+            y=alt.Y(f"{col_b}:Q", scale=alt.Scale(domain=[0, b_max]), title=label_b),
+        )
+        .properties(height=160)
+    )
+    st.altair_chart(b_chart, width="stretch", alt=f"{label_b} through day {frame + 1} of {n}")
+
+
+@st.fragment(run_every="400ms")
+def animated_train_section(history: dict, hetero_tracks: list[tuple[str, pd.DataFrame]]) -> None:
+    """One timer driving every animated chart in the Train tab (training
+    curves, loss variance, one heteroscedasticity chart per ticker)."""
+    has_loss_var = "train_loss_std" in history and "val_loss_std" in history
+    track_keys = ["trainsec_epoch_idx"]
+    if has_loss_var:
+        track_keys.append("trainsec_lossvar_idx")
+    hetero_keys = [f"trainsec_hetero_{t}_idx" for t, _ in hetero_tracks]
+    playing = _section_controls("trainsec", track_keys + hetero_keys)
+
+    n_epoch = len(history["train_loss"])
+    epoch_frame = _track_frame("trainsec_epoch_idx", n_epoch, playing)
+    st.subheader("Animated training playback")
+    _draw_training_curves(history, epoch_frame)
+
+    if has_loss_var:
+        n_lossvar = len(history["train_loss_std"])
+        lossvar_frame = _track_frame("trainsec_lossvar_idx", n_lossvar, playing)
+        st.subheader("Per-trade loss variance per epoch")
+        _draw_loss_variance(history, lossvar_frame)
+
+    if hetero_tracks:
+        st.subheader("Volatility clustering check (train/dev)")
+        for ticker, hetero_df in hetero_tracks:
+            n_h = len(hetero_df)
+            h_frame = _track_frame(f"trainsec_hetero_{ticker}_idx", n_h, playing, step=45)
+            st.markdown(f"**{ticker}**")
+            _draw_timeseries_pair(
+                hetero_df, "date", "daily_return", "garch_vol_fcst",
+                "daily return", "annualized vol fcst",
+                f"{ticker} returns vs. GARCH volatility forecast", h_frame,
+            )
+
+
+@st.fragment(run_every="400ms")
+def animated_report_section(
+    key_prefix: str, calibration_df: pd.DataFrame | None, variance_df: pd.DataFrame | None,
+    equity_series: pd.Series | None, title: str,
+) -> None:
+    """One timer driving every animated chart in an eval/holdout report
+    (calibration, outcome variance, equity + drawdown)."""
+    track_keys = []
+    if calibration_df is not None and len(calibration_df):
+        track_keys.append(f"{key_prefix}_calib_idx")
+    if variance_df is not None and len(variance_df):
+        track_keys.append(f"{key_prefix}_variance_idx")
+    if equity_series is not None and len(equity_series) >= 2:
+        track_keys.append(f"{key_prefix}_equity_idx")
+    if not track_keys:
+        return
+    playing = _section_controls(key_prefix, track_keys)
+
+    if calibration_df is not None and len(calibration_df):
+        frame = _track_frame(f"{key_prefix}_calib_idx", len(calibration_df), playing, step=15)
+        st.subheader("Animated calibration")
+        _draw_bucket_bar(
+            calibration_df, "take_prob_bucket", "win_rate", "fraction net_return > 0",
+            "Calibration: realized win-rate by take_prob bucket", frame,
+        )
+
+    if variance_df is not None and len(variance_df):
+        frame = _track_frame(f"{key_prefix}_variance_idx", len(variance_df), playing, step=15)
+        st.subheader("Animated outcome variance")
+        _draw_bucket_bar(
+            variance_df, "take_prob_bucket", "std_return", "std(net_return) within bucket",
+            "Outcome variance: std of net_return by take_prob bucket", frame,
+        )
+
+    if equity_series is not None and len(equity_series) >= 2:
+        frame = _track_frame(f"{key_prefix}_equity_idx", len(equity_series), playing, step=15)
+        st.subheader("Animated equity curve & drawdown")
+        _draw_equity_curve(equity_series, title, frame)
+
+
 def render_report(run_dir: Path, reports_subdir: str, label: str) -> None:
     reports_dir = run_dir / reports_subdir
     metrics = load_csv(reports_dir / "fold_metrics.csv")
@@ -169,15 +433,14 @@ def render_report(run_dir: Path, reports_subdir: str, label: str) -> None:
     st.caption(f"n_test_trades={row['n_test_trades']}  |  n_admitted_portfolio={row['n_admitted_portfolio']}  |  "
                f"selected_threshold={row['selected_threshold']}")
 
-    img_cols = st.columns(4)
-    for col, name, caption in zip(
-        img_cols,
-        ["equity_curve.png", "drawdown.png", "calibration.png", "outcome_variance.png"],
-        ["Equity curve", "Drawdown", "Calibration", "Outcome variance"],
-    ):
-        p = reports_dir / name
-        if p.exists():
-            col.image(str(p), caption=caption, use_container_width=True)
+    key_prefix = "report_" + "".join(c if c.isalnum() else "_" for c in reports_subdir)
+
+    calibration_df = load_csv(reports_dir / "calibration.csv")
+
+    equity_df = load_csv(reports_dir / "equity_curve.csv")
+    equity_series = None
+    if equity_df is not None and len(equity_df):
+        equity_series = equity_df.assign(date=pd.to_datetime(equity_df["date"])).set_index("date")["equity"]
 
     variance_by_bucket = load_csv(reports_dir / "variance_by_bucket.csv")
     if variance_by_bucket is not None and len(variance_by_bucket):
@@ -210,6 +473,8 @@ def render_report(run_dir: Path, reports_subdir: str, label: str) -> None:
         )
         with st.expander("Variance by bucket (raw numbers)"):
             st.dataframe(variance_by_bucket, use_container_width=True)
+
+    animated_report_section(key_prefix, calibration_df, variance_by_bucket, equity_series, label)
 
     trades = load_csv(reports_dir / "accepted_trades.csv")
     if trades is not None and len(trades):
@@ -590,7 +855,6 @@ with tab_train:
     training_curves_path = run_dir / "training_curves.png"
     if training_curves_path.exists():
         st.subheader("Training curves")
-        st.image(str(training_curves_path), use_container_width=True)
         history = load_json(run_dir / "history.json")
         n_epochs = len(history["train_loss"]) if history else 0
         final_train_loss = history["train_loss"][-1] if history else None
@@ -621,8 +885,6 @@ toward the actual outcome (label 1 = target hit profitably, 0 = stop/timeout).
         )
     loss_variance_path = run_dir / "loss_variance.png"
     if loss_variance_path.exists():
-        st.subheader("Per-trade loss variance per epoch")
-        st.image(str(loss_variance_path), use_container_width=True)
         history = load_json(run_dir / "history.json")
         if history and "train_loss_std" in history and "val_loss_std" in history:
             final_train_loss_std = history["train_loss_std"][-1]
@@ -651,11 +913,19 @@ toward the actual outcome (label 1 = target hit profitably, 0 = stop/timeout).
                 f"`val_loss_std={final_val_loss_std:.4f}`.\n\n" + hetero_note
             )
 
-    hetero_plots = sorted(run_dir.glob("heteroscedasticity_*.png")) if run_dir.exists() else []
-    if hetero_plots:
-        st.subheader("Volatility clustering check (train/dev)")
-        for p in hetero_plots:
-            st.image(str(p), caption=p.stem.replace("heteroscedasticity_", ""), use_container_width=True)
+    hetero_csvs = sorted(run_dir.glob("heteroscedasticity_*.csv")) if run_dir.exists() else []
+    hetero_tracks = []
+    for p in hetero_csvs:
+        ticker = p.stem.replace("heteroscedasticity_", "")
+        hetero_df = load_csv(p)
+        if hetero_df is None or len(hetero_df) < 2:
+            continue
+        hetero_df["date"] = pd.to_datetime(hetero_df["date"])
+        hetero_tracks.append((ticker, hetero_df))
+
+    history = load_json(run_dir / "history.json")
+    if history and len(history.get("train_loss", [])) >= 2:
+        animated_train_section(history, hetero_tracks)
 
 with tab_eval:
     st.write(f"Evaluates the saved model on the dev slice of its own training run "

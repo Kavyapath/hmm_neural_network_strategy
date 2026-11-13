@@ -473,7 +473,9 @@ def _write_outcome_variance_report(
         stats = grouped.agg(["mean", "std", "count"]).rename(
             columns={"mean": "mean_return", "std": "std_return", "count": "n_trades"}
         )
-        stats.to_csv(reports_dir / "variance_by_bucket.csv")
+        stats.rename_axis("take_prob_bucket").reset_index().assign(
+            take_prob_bucket=lambda d: d["take_prob_bucket"].astype(str)
+        ).to_csv(reports_dir / "variance_by_bucket.csv", index=False)
 
         stats["std_return"].plot(
             ax=ax, kind="bar", color="#F58518",
@@ -606,6 +608,7 @@ def cmd_evaluate(args: argparse.Namespace) -> None:
     }])
     fold_metrics.to_csv(reports_dir / "fold_metrics.csv", index=False)
     _write_trades_csv(reports_dir / "accepted_trades.csv", accepted, accepted_probs)
+    equity_curve.rename("equity").to_csv(reports_dir / "equity_curve.csv", index_label="date")
 
     import matplotlib
     matplotlib.use("Agg")
@@ -631,6 +634,9 @@ def cmd_evaluate(args: argparse.Namespace) -> None:
         n_bins = min(5, max(1, len(test_probs) // 3)) if len(test_probs) >= 3 else 1
         bins = pd.qcut(pd.Series(test_probs), n_bins, duplicates="drop")
         realized = pd.Series(test_trades["net_return"].to_numpy() > 0).groupby(bins).mean()
+        calib_out = realized.rename("win_rate").rename_axis("take_prob_bucket").reset_index()
+        calib_out["take_prob_bucket"] = calib_out["take_prob_bucket"].astype(str)
+        calib_out.to_csv(reports_dir / "calibration.csv", index=False)
         realized.plot(ax=ax, kind="bar", title="Calibration: realized win-rate by take_prob bucket")
     ax.set_ylabel("fraction net_return > 0")
     fig.savefig(reports_dir / "calibration.png", bbox_inches="tight")
@@ -744,6 +750,7 @@ def cmd_evaluate_holdout(args: argparse.Namespace) -> None:
     }])
     fold_metrics.to_csv(reports_dir / "fold_metrics.csv", index=False)
     _write_trades_csv(reports_dir / "accepted_trades.csv", accepted, accepted_probs)
+    equity_curve.rename("equity").to_csv(reports_dir / "equity_curve.csv", index_label="date")
 
     import matplotlib
     matplotlib.use("Agg")
@@ -769,6 +776,9 @@ def cmd_evaluate_holdout(args: argparse.Namespace) -> None:
         n_bins = min(5, max(1, len(test_probs) // 3)) if len(test_probs) >= 3 else 1
         bins = pd.qcut(pd.Series(test_probs), n_bins, duplicates="drop")
         realized = pd.Series(test_trades["net_return"].to_numpy() > 0).groupby(bins).mean()
+        calib_out = realized.rename("win_rate").rename_axis("take_prob_bucket").reset_index()
+        calib_out["take_prob_bucket"] = calib_out["take_prob_bucket"].astype(str)
+        calib_out.to_csv(reports_dir / "calibration.csv", index=False)
         realized.plot(ax=ax, kind="bar", title="Holdout calibration: realized win-rate by take_prob bucket")
     ax.set_ylabel("fraction net_return > 0")
     fig.savefig(reports_dir / "calibration.png", bbox_inches="tight")
