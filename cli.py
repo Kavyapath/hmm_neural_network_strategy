@@ -390,7 +390,15 @@ def cmd_train(args: argparse.Namespace) -> None:
 
     # heteroscedasticity_<ticker>.png — returns vs. the frozen vol forecast
     # over train+dev, the visual check that the GARCH fit is actually
-    # tracking volatility clustering rather than just a flat average.
+    # tracking volatility clustering rather than just a flat average. Drop any
+    # leftover files from a ticker no longer in this run_id (e.g. switching
+    # from INTC/NVDA to MRVL while reusing the same run_id) so the UI doesn't
+    # keep showing a stale ticker's chart.
+    for stale in list(run_dir.glob("heteroscedasticity_*.png")) + list(run_dir.glob("heteroscedasticity_*.csv")):
+        stale_ticker = stale.stem.replace("heteroscedasticity_", "")
+        if stale_ticker not in volatility_models:
+            stale.unlink()
+
     for ticker, volatility_model in volatility_models.items():
         plot_heteroscedasticity(
             price_data[ticker]["close"], volatility_model,
