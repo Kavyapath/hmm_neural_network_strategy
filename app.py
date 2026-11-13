@@ -147,6 +147,16 @@ def load_csv(path: Path) -> pd.DataFrame | None:
     return pd.read_csv(path) if path.exists() else None
 
 
+def load_csv_with_cols(path: Path, *required_cols: str) -> pd.DataFrame | None:
+    """Like load_csv, but returns None if the file exists but predates a
+    schema change and is missing a column this code now expects (stale
+    report from an older cli.py version), instead of crashing downstream."""
+    df = load_csv(path)
+    if df is not None and not set(required_cols).issubset(df.columns):
+        return None
+    return df
+
+
 def _section_controls(state_prefix: str, track_idx_keys: list[str]) -> bool:
     """One Play/Pause/Reset control for a whole section's charts, so the
     section needs exactly one st.fragment(run_every=...) timer instead of one
@@ -435,14 +445,16 @@ def render_report(run_dir: Path, reports_subdir: str, label: str) -> None:
 
     key_prefix = "report_" + "".join(c if c.isalnum() else "_" for c in reports_subdir)
 
-    calibration_df = load_csv(reports_dir / "calibration.csv")
+    calibration_df = load_csv_with_cols(reports_dir / "calibration.csv", "take_prob_bucket", "win_rate")
 
-    equity_df = load_csv(reports_dir / "equity_curve.csv")
+    equity_df = load_csv_with_cols(reports_dir / "equity_curve.csv", "date", "equity")
     equity_series = None
     if equity_df is not None and len(equity_df):
         equity_series = equity_df.assign(date=pd.to_datetime(equity_df["date"])).set_index("date")["equity"]
 
-    variance_by_bucket = load_csv(reports_dir / "variance_by_bucket.csv")
+    variance_by_bucket = load_csv_with_cols(
+        reports_dir / "variance_by_bucket.csv", "take_prob_bucket", "std_return"
+    )
     if variance_by_bucket is not None and len(variance_by_bucket):
         std_col = variance_by_bucket["std_return"].dropna()
         rising = len(std_col) >= 2 and std_col.iloc[-1] > std_col.iloc[0] * 1.2
@@ -917,7 +929,7 @@ toward the actual outcome (label 1 = target hit profitably, 0 = stop/timeout).
     hetero_tracks = []
     for p in hetero_csvs:
         ticker = p.stem.replace("heteroscedasticity_", "")
-        hetero_df = load_csv(p)
+        hetero_df = load_csv_with_cols(p, "date", "daily_return", "garch_vol_fcst")
         if hetero_df is None or len(hetero_df) < 2:
             continue
         hetero_df["date"] = pd.to_datetime(hetero_df["date"])
