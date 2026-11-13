@@ -187,7 +187,11 @@ def _track_frame(idx_key: str, n_frames: int, playing: bool, step: int = 1) -> i
     frames per section tick and loops back to the start at the end."""
     frame = min(st.session_state.get(idx_key, 0), max(n_frames - 1, 0))
     if playing and n_frames > 0:
-        st.session_state[idx_key] = (frame + step) % n_frames
+        # If step is an exact multiple of n_frames, frame+step == frame (mod
+        # n_frames) every tick - the animation looks completely frozen. Fall
+        # back to advancing by 1 so it's always visibly moving.
+        effective_step = step % n_frames or 1
+        st.session_state[idx_key] = (frame + effective_step) % n_frames
     return frame
 
 
