@@ -91,7 +91,7 @@ def load_real_ohlc(ticker: str, start: str, end: str, timeframe: str = "1Day",
     while True:
         params = {
             "timeframe": timeframe, "start": start, "end": end,
-            "limit": 10000, "adjustment": "raw", "feed": feed,
+            "limit": 10000, "adjustment": "all", "feed": feed,
         }
         if page_token:
             params["page_token"] = page_token
